@@ -480,7 +480,7 @@ struct AddItemView: View {
 
     private var categoryCard: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Pick a category first, then add as many photos as you want for that shelf.")
+            Text("Pick a category first, then add as many photos as you want for that shelf!")
                 .font(.subheadline)
                 .foregroundStyle(AppTheme.subtitleGray)
 
