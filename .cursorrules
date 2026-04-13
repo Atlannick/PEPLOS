@@ -1,0 +1,292 @@
+# PEPLOS — Cursor Referans Rehberi
+
+## 1. Projenin Amacı
+
+PEPLOS, kullanıcının fiziksel gardırobunu dijitalleştirdiği bir **AI destekli kıyafet & kombin asistanı** iOS uygulamasıdır.
+
+Temel işlevler:
+- **Closet (Gardırop):** Kıyafet fotoğraflarını kategorilere göre (Tops, Bottoms, Shoes, vb.) yükleme ve yönetme. Fotoğraf, kamera veya galeriden alınır; `BackgroundRemovalService` ile arka plan kaldırılır, `ImageProcessor` ile optimize edilir.
+- **Build Outfit (Kombin Oluşturma):** Gardıroptan seçilen parçalarla manuel kombin oluşturma ve kaydetme.
+- **Lucky Look:** `LuckyLookManager` aracılığıyla on-device yapay zeka motoru (`FashionEngine`) ile otomatik kıyafet önerisi.
+- **Stylist:** `StylistWeatherController` ile hava durumuna göre kıyafet tavsiyesi.
+- **Collections:** Kombinleri koleksiyonlara (`CollectionService`) ayırma.
+- **Settings:** Uygulama tercihleri, favori renkler, yedekleme/geri yükleme (`BackupService`).
+
+Hedef platform: **iOS 18.6+**, SwiftUI tabanlı, yalnızca telefon (iPhone).  
+Bundle ID: `com.atlan.PEPLOS`  
+Kurucu: Atlan Nick (kuruluş: Nisan 2026)
+
+---
+
+## 2. Mimari Yapı
+
+### Pattern: Store + View (MVVM'e yakın, ViewModel katmanı isimsiz)
+
+Projede resmi bir MVVM klasörü yoktur. Bunun yerine `Services/` altındaki `*Store`, `*Service`, `*Manager` sınıfları ViewModel rolünü üstlenir.
+
+```
+ContentView (kök, @StateObject'ler burada yaşar)
+    └── HomeView / ClosetView / StylistView / OutfitsView / SettingsView
+            └── Components/* (yeniden kullanılabilir UI parçaları)
+```
+
+### Veri Akışı
+
+```
+ContentView
+  @StateObject → ClosetStore
+  @StateObject → OutfitStore
+  @StateObject → CollectionService
+  @StateObject → StylistWeatherController
+  @StateObject → LuckyLookManager
+  @StateObject → AppSettingsStore
+       │
+       ▼ (.environmentObject)
+  Alt ekranlar → @EnvironmentObject ile tüketir
+       │
+       ▼ (yerel UI durumu)
+  @State → sheet'ler, seçili öğe, yükleme bayrakları
+```
+
+**Temel kural:** Tüm store örnekleri yalnızca `ContentView`'da `@StateObject` olarak oluşturulur ve `.environmentObject(...)` ile aşağıya iletilir. Hiçbir alt view kendi `@StateObject` store'u oluşturmaz.
+
+### Framework'ler
+
+| Framework | Kullanım Yeri |
+|-----------|---------------|
+| **SwiftUI** | Tüm ekranlar ve bileşenler |
+| **UIKit** | Görüntü işleme, foto seçici, paylaşım sheet'i (`UIActivityViewController`, `UIImage`) |
+| **Combine** | `ObservableObject` + `@Published` store'lar |
+| **Swift Concurrency** | `Task { @MainActor in ... }` ile async işler (Lucky Look, görüntü işleme) |
+
+### Actor İzolasyonu
+
+`SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` — proje genelinde **varsayılan actor MainActor**'dır.  
+Store sınıfları açıkça `@MainActor final class *Store: ObservableObject` şeklinde işaretlidir.
+
+### Persistence Katmanı
+
+`DurableStore` — çift yazma stratejisi:
+- **Birincil:** `Documents/` dizininde JSON dosyası (örn. `closet.v2.json`, `outfits.v1.json`)
+- **Yedek:** `UserDefaults` (aynı JSON payload)  
+- Görüntüler `ClothingImageStorage` aracılığıyla `Documents/` altında dosya olarak saklanır (PNG cutout + JPEG thumbnail çifti).
+
+### On-Device Moda Motoru
+
+`FashionEngine` — dışa açık facade (enum), iç modüllere erişimi kapsüller:
+- `FashionRules` → renk uyumu, kategori uyumu, kombinasyon sıralaması
+- `FashionKnowledgeEngine` → bilgi tabanı sorguları
+- `FashionOutfitNarrativeBuilder` → insan okunur kombin açıklaması
+
+---
+
+## 3. Kodlama Standartları
+
+### İsimlendirme Kuralları
+
+| Tür | Kural | Örnek |
+|-----|-------|-------|
+| View | `*View` suffix | `HomeView`, `AddItemView` |
+| Store/Service | `*Store`, `*Service`, `*Manager`, `*Controller` | `ClosetStore`, `BackupService` |
+| Model | Düz isim, `Clothing*` prefix tercihli | `ClothingItem`, `SavedOutfit` |
+| Bileşen | Açıklayıcı isim, `Components/` altında | `OutfitCard`, `MainTabBar` |
+| Theme | `AppTheme` enum içinde `static let/var` | `AppTheme.accent` |
+| Preview | Her Swift dosyasının sonunda `#Preview { ... }` |  |
+
+### `@Published` Kapsülleme
+
+Store'lardaki `@Published` property'ler genellikle `private(set)` ile kapsüllenir:
+```swift
+@Published private(set) var items: [ClothingItem] = []
+```
+
+### MARK Bölümleme
+
+Store ve servis dosyaları `// MARK: -` ile bölümlenir:
+```swift
+// MARK: - Public queries
+// MARK: - Private
+// MARK: - Legacy migration
+```
+
+### Hata Yönetimi
+
+Kritik migration ve storage işlemlerinde `do/catch`, genel akışlarda `guard/return` tercih edilir. Hata mesajları `StorageRecovery` üzerinden kullanıcıya iletilir.
+
+### Tema Kullanımı
+
+Renk ve gölge için her zaman `AppTheme` kullanılır, sabit hex/RGB değerleri view içine gömülmez:
+```swift
+.foregroundColor(AppTheme.subtitleGray)
+.tint(AppTheme.accent)
+.pepCardShadow()   // View extension (AppTheme.swift'te tanımlı)
+.pepSubtleShadow()
+```
+
+### Debug Yardımcılar
+
+`#if DEBUG` bloğu ile sarılır, prefix olarak `debug_` kullanılır:
+```swift
+#if DEBUG
+func debug_addHatsCategoryOnly() { ... }
+#endif
+```
+
+### Dosya Başlığı
+
+Her Swift dosyası standart Xcode header'ı ile başlar:
+```swift
+//
+//  FileName.swift
+//  PEPLOS
+//
+```
+
+---
+
+## 4. Dosya & Klasör Yapısı
+
+```
+PEPLOS/
+├── PEPLOSApp.swift              # @main giriş noktası
+├── ContentView.swift            # Kök view; tüm store'lar burada oluşturulur
+├── HomeView.swift               # Ana ekran (Lucky Look, özet, son eklenenler)
+├── ClosetView.swift             # Gardırop listesi
+├── OutfitsView.swift            # Kayıtlı kombinler
+├── StylistView.swift            # Hava durumu tabanlı öneri
+├── SettingsView.swift           # Ayarlar
+├── BuildOutfitView.swift        # Kombin oluşturma akışı
+├── AddItemView.swift            # Fotoğraf ekleme akışı
+├── AddItemMetadataView.swift    # Kıyafet metadata girişi
+├── TimeOfDayGreeting.swift      # Home'daki selamlama bileşeni
+│
+├── Components/                  # Yeniden kullanılabilir SwiftUI bileşenleri
+│   ├── MainTab.swift            # Tab enum tanımı
+│   ├── MainTabBar.swift         # Özel tab bar
+│   ├── OutfitCard.swift
+│   ├── ClothingCard.swift
+│   ├── LuckyLookResultView.swift
+│   ├── HomeSummaryCard.swift
+│   └── ...                      # ~28 dosya
+│
+├── Models/                      # Saf veri modelleri (Codable struct'lar)
+│   ├── ClothingItem.swift       # Kıyafet satırı (persistence birimi)
+│   ├── ClosetItem.swift         # UI'ye özel display modeli
+│   ├── ClothingCategory.swift   # Kategori entity
+│   ├── SavedOutfit.swift        # Kaydedilmiş kombin
+│   ├── CollectionModel.swift    # Koleksiyon entity
+│   └── ClothingImportProcessingPath.swift
+│
+├── Services/                    # Store'lar, servisler, yöneticiler
+│   ├── ClosetStore.swift        # Gardırop durumu + persistence
+│   ├── OutfitStore.swift        # Kombin durumu + persistence
+│   ├── CollectionService.swift  # Koleksiyon yönetimi
+│   ├── AppSettingsStore.swift   # Uygulama tercihleri
+│   ├── LuckyLookManager.swift   # AI outfit öneri motoru
+│   ├── StylistWeatherController.swift
+│   ├── ImageProcessor.swift     # Görüntü kırpma, boyutlandırma, aspect ratio
+│   ├── BackgroundRemovalService.swift
+│   ├── BackupService.swift      # JSON yedekleme/geri yükleme
+│   ├── DurableStore.swift       # Çift yazma persistence (JSON + UserDefaults)
+│   └── ...                      # ~22 dosya
+│
+├── Fashion/                     # On-device moda zekası
+│   ├── FashionEngine.swift      # Dışa açık facade (enum)
+│   ├── FashionRules.swift       # Renk & kategori uyum kuralları
+│   ├── FashionTypes.swift       # Enum'lar ve protokoller
+│   ├── FashionKnowledge.swift   # Bilgi tabanı
+│   └── ...                      # ~7 dosya
+│
+├── Settings/                    # Ayarlar alt ekranları
+├── Onboarding/                  # İlk açılış rehberi
+└── Theme/
+    └── AppTheme.swift           # Merkezi renk & gölge paleti
+```
+
+---
+
+## 5. Genişletme Planı — Yeni Modül Eklerken
+
+### Yeni bir ekran (tab veya modal) eklerken:
+
+1. **Dosyayı kök `PEPLOS/` dizinine koy** (mevcut ekranlarla aynı seviye); veya mantıksal bir grup için alt klasör oluştur.
+2. `ContentView.swift`'te ilgili store'ları `@StateObject` olarak ekle ve `.environmentObject(...)` zincirini genişlet.
+3. Yeni tab ise `MainTab.swift`'teki enum'a case ekle ve `MainTabBar.swift`'i güncelle.
+4. **Hiçbir zaman** child view içinde store'u `@StateObject` olarak örnekleme — her zaman `@EnvironmentObject` ile al.
+
+### Yeni bir Store/Service eklerken:
+
+```swift
+@MainActor
+final class YeniStore: ObservableObject {
+    @Published private(set) var state: [Model] = []
+
+    // MARK: - Public API
+    func doSomething() { ... }
+
+    // MARK: - Private
+    private func save() { ... }
+}
+```
+
+- `@MainActor` zorunlu (proje genelinde varsayılan MainActor izolasyonu var).
+- Persistence için `DurableStore.save/load` kullanılır.
+- `ContentView.swift`'e `@StateObject` olarak eklenir.
+
+### Yeni bir bileşen eklerken:
+
+- `Components/` klasörüne koy.
+- Renk/gölge için `AppTheme` kullan.
+- `#Preview { ... }` bloğu ekle.
+
+### Fashion Engine'i genişletirken:
+
+- `Fashion/` modülü içinden dışarı erişim yalnızca `FashionEngine` facade'ı üzerinden yapılır.
+- Yeni kurallar `FashionRules.swift`'e, yeni tipler `FashionTypes.swift`'e eklenir.
+- `FashionEngine` enum'una yeni `static func` olarak dışa açılır.
+
+### Veri modeli değişikliklerinde:
+
+- `Codable` uyumluluğunu koru.
+- Eski veriyle geriye uyumluluk için migration ekle (`migrateFromLegacy...` pattern'ini takip et).
+- Yeni field'lar `var` + `= nil` (opsiyonel) veya varsayılan değerle açılırsa eski JSON'lar bozulmaz.
+- `DurableStore` key versiyonlamasına dikkat et (örn. `peplos.closet.persisted.v2` → `v3`).
+
+### Renk & Görsel stil:
+
+- Tüm renkler `AppTheme` enum'una eklenir, view içine gömülmez.
+- Gölge için `pepCardShadow()` / `pepSubtleShadow()` View extension'ları kullanılır.
+- Uygulama şu an **yalnızca Light Mode**'u destekler (`PEPLOSApp.swift` içinde `.preferredColorScheme(.light)` ile kilitlenmiş). Dark Mode desteği ileride planlanıyor; yeni bileşenlerde dark mode'u erken test etme.
+
+---
+
+## 6. Bağımlılıklar
+
+**Harici bağımlılık yöneticisi yok.**
+
+| Araç | Durum |
+|------|-------|
+| Swift Package Manager | ❌ Kullanılmıyor (`Package.swift` yok, `pbxproj` paket listesi boş) |
+| CocoaPods | ❌ Kullanılmıyor (`Podfile` yok) |
+| Carthage | ❌ Kullanılmıyor |
+| Sistem framework'leri | ✅ Yalnızca Apple'ın birinci taraf framework'leri |
+
+**Kullanılan Apple framework'leri:** `SwiftUI`, `UIKit`, `Combine`, `Foundation`, `Vision` (arka plan kaldırma için muhtemel).
+
+Yeni bir bağımlılık eklenecekse **Swift Package Manager** tercih edilmeli, CocoaPods değil.
+
+---
+
+## 7. Hızlı Başvuru
+
+| Soru | Cevap |
+|------|-------|
+| Gardırop verisi nerede persist edilir? | `Documents/closet.v2.json` + UserDefaults fallback (`DurableStore`) |
+| Kombinler nerede persist edilir? | `Documents/outfits.v1.json` (muhtemelen) |
+| Görüntüler nerede saklanır? | `ClothingImageStorage` → `Documents/` altı dosyalar |
+| Tema renkleri nereden alınır? | `AppTheme` enum (`Theme/AppTheme.swift`) |
+| Yeni store nasıl kaydedilir? | `ContentView`'da `@StateObject` + `.environmentObject(...)` |
+| Moda önerisi motoru hangisi? | `FashionEngine` (on-device, `Fashion/` modülü) |
+| Minimum iOS versiyonu nedir? | iOS 18.6 |
+| Dark Mode desteği var mı? | Hayır — `.preferredColorScheme(.light)` ile kilitlenmiş |
+| Test dosyaları var mı? | Görünmüyor; ilerleyen aşamada eklenebilir |
